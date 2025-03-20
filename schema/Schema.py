@@ -57,6 +57,29 @@ def to_sql_type(type_str: str) -> str:
         raise ValueError(f"Unknown type {type_str}.")
 
 
+def to_cql_type(type_str: str) -> str:
+    if type_str == 'float':
+        return 'float'
+    elif type_str == 'double':
+        return 'double'
+    elif type_str == 'int':
+        return 'int'  # 31 bit with sign
+    elif type_str == 'long':
+        return 'bigint'  # 63 bit with sign
+    elif type_str == 'bigint':
+        return 'bigint'  # 63 bit with sign
+    elif type_str == 'string':
+        return 'ascii'
+    elif type_str == 'char':
+        return 'ascii'
+    elif type_str == 'boolean':
+        return 'boolean'
+    elif type_str == 'blob':
+        return 'blob'
+    else:
+        raise ValueError(f"Unknown type {type_str}.")
+
+
 class Schema:
     """Lasair Schema."""
 
@@ -116,10 +139,6 @@ class Schema:
             fields += section.get("fields", [])
         return fields
 
-    def indexes(self):
-        """Get the indexes for the schema (or None if no index section)"""
-        return self._data.get("indexes")
-
     def dict(self) -> dict:
         """Return a python dict representation of the schema. Includes only fields (both core and extended),
         i.e. does not include indexes and flattens sections."""
@@ -135,7 +154,6 @@ class Schema:
 
     def sql_create(self) -> str:
         """Return an SQL create table statement corresponding to the schema"""
-        tablename = self.name
         lines = []
         for f in self.fields():
             s = '`' + f['name'] + '` '   # name with backquotes for SQL
@@ -145,20 +163,30 @@ class Schema:
             if 'extra' in f:  # is there an EXTRA
                 s += ' ' + f['extra']
             lines.append(s)
-        sql = 'CREATE TABLE IF NOT EXISTS ' + tablename + '(\n'
+        sql = 'CREATE TABLE IF NOT EXISTS ' + self.name + '(\n'
         sql += ',\n'.join(lines)
-        if self.indexes():  # add in the INDEX
-            sql += ',\n' + ',\n'.join(self.indexes())
+        if "indexes" in self._data:  # add in the INDEX
+            sql += ',\n' + ',\n'.join(self._data["indexes"])
         sql += '\n)\n'
         return sql
 
-    def sql_alter(self) -> str:
-        """Return an SQL alter table statement corresponding to the schema"""
-        pass
-
     def cql_create(self) -> str:
         """Return a Cassandra CQL create table statement corresponding to the schema"""
-        pass
+        lines = []
+        for f in self.fields():
+            s = '"' + f['name'] + '" '   # name with double quotes for CQL
+            s += to_cql_type(f['type'])  # convert AVRO type to CQL type
+            if 'extra' in f:  # is there an EXTRA
+                s += ' ' + f['extra']
+            lines.append(s)
+        cql = 'CREATE TABLE IF NOT EXISTS ' + self.name + '(\n'
+        cql += ',\n'.join(lines)
+        if "indexes" in self._data:  # add in the INDEX
+            cql += ',\n' + ',\n'.join(self._data["indexes"])
+        cql += '\n)\n'
+        if "with" in self._data:  # add in the WITH at the very end
+            cql += self._data["with"] + '\n'
+        return cql
 
     def cql_alter(self) -> str:
         """Return a Cassandra CQL alter table statement corresponding to the schema"""
@@ -174,13 +202,15 @@ class Schema:
         if headers:
             html += f"<html>\n<head>\n<title>{ self.name }</title>\n</head>\n<body>\n"
             html += f"<h1>{ self.name }</h1>\n"
-        use_sections = False
-        if len(self.sections()) > 1:
-            use_sections = True
-        for s in self.sections():
+        if include_ext:
+            secs = self.sections()
+        else:
+            secs = self.core_sections()
+        for s in secs:
+            if use_sections:
+                html += f"<h2>{ s.get('section', '') }</h2>\n"
+                html += f"<p>{ s.get('doc', '') }</p>\n"
             html += "<table>\n"
-            html += f"<h2>{ s.get('section', '') }</h2>\n"
-            html += f"<p>{ s.get('doc', '') }</p>\n"
             for f in s.get("fields", []):
                 html += f"<tr><td>{ f.get('name', '') }</td><td>{ f.get('doc', '') }</td></tr>\n"
             html += "</table>\n"
@@ -194,3 +224,58 @@ def get_schema(name: str, version: str = default_version) -> Schema:
     s.load()
     return s
 
+
+def get_sql_alter(name: str, old_version: str, new_version: str) -> str:
+    """For the given schema, find differences between old_version and new_version
+    and return an ALTER_TABLE SQL statement"""
+    old_schema = get_schema(name, old_version)
+    new_schema = get_schema(name, new_version)
+    fields_old = old_schema.fields()
+    fields_new = new_schema.fields()
+    attr_old = [f['name'] for f in fields_old if 'name' in f]
+    attr_new = [f['name'] for f in fields_new if 'name' in f]
+
+    lines = ''
+    # What needs to be ADDed to get the new schema
+    for f in fields_new:
+        if 'name' not in f:
+            continue
+        if f['name'] in attr_old:
+            continue
+        lines += 'ALTER TABLE %s ADD `%s` %s;\n' % (name, f['name'], to_sql_type(f['type']))
+    # What needs to be DROPped to get the new schema
+    for f in fields_old:
+        if 'name' not in f:
+            continue
+        if f['name'] in attr_new:
+            continue
+        lines += 'ALTER TABLE %s DROP COLUMN `%s` %s\n;' % (name, f['name'], to_sql_type(f['type']))
+    return lines
+
+
+def get_cql_alter(name: str, old_version: str, new_version: str) -> str:
+    """For the given schema, find differences between old_version and new_version
+    and return an ALTER_TABLE CQL statement"""
+    old_schema = get_schema(name, old_version)
+    new_schema = get_schema(name, new_version)
+    fields_old = old_schema.fields()
+    fields_new = new_schema.fields()
+    attr_old = [f['name'] for f in fields_old if 'name' in f]
+    attr_new = [f['name'] for f in fields_new if 'name' in f]
+
+    lines = ''
+    # What needs to be ADDed to get the new schema
+    for f in fields_new:
+        if 'name' not in f:
+            continue
+        if f['name'] in attr_old:
+            continue
+        lines += 'ALTER TABLE %s ADD "%s" %s;\n' % (name, f['name'], to_cql_type(f['type']))
+    # What needs to be DROPped to get the new schema
+    for f in fields_old:
+        if 'name' not in f:
+            continue
+        if f['name'] in attr_new:
+            continue
+        lines += 'ALTER TABLE %s DROP `%s` %s;\n' % (name, f['name'], to_cql_type(f['type']))
+    return lines
