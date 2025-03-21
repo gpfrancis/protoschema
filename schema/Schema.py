@@ -216,6 +216,7 @@ class Schema:
 
 
 def get_schema(name: str, version: str = default_version) -> Schema:
+    """Instantiate a new Schema object and populate the schema data."""
     s = Schema(name, version)
     s.load()
     return s
