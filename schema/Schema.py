@@ -188,10 +188,6 @@ class Schema:
             cql += self._data["with"] + '\n'
         return cql
 
-    def cql_alter(self) -> str:
-        """Return a Cassandra CQL alter table statement corresponding to the schema"""
-        pass
-
     def json(self) -> str:
         """Return a JSON representation of the schema"""
         return json.dumps(self._data, indent=2)
